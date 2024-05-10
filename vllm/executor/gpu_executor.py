@@ -46,6 +46,7 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=rank == 0,
+            from_remote_program=self.from_remote_program,
         )
 
     def _create_worker(self,

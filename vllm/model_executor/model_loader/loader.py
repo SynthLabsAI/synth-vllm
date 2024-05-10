@@ -24,7 +24,7 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    pt_weights_iterator, safetensors_weights_iterator, remote_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 
 _VISION_MODEL_CLASSES = [
@@ -103,7 +103,8 @@ class BaseModelLoader(ABC):
                    lora_config: Optional[LoRAConfig],
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig) -> nn.Module:
+                   scheduler_config: SchedulerConfig,
+                   from_remote_program: bool=False) -> nn.Module:
         """Load a model with the given configurations."""
         ...
 
@@ -196,9 +197,11 @@ class DefaultModelLoader(BaseModelLoader):
 
     def _get_weights_iterator(
         self, model_name_or_path: str, revision: Optional[str],
-        fall_back_to_pt: bool
+        fall_back_to_pt: bool, from_remote_program: bool = False
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-        """Get an iterator for the model weights based on the load format."""
+        if from_remote_program:
+            return remote_weights_iterator()
+        """Get an iterator for the model weights based on the oad format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision, fall_back_to_pt)
         if self.load_config.load_format == LoadFormat.NPCACHE:
@@ -216,7 +219,8 @@ class DefaultModelLoader(BaseModelLoader):
                    lora_config: Optional[LoRAConfig],
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig) -> nn.Module:
+                   scheduler_config: SchedulerConfig,
+                   from_remote_program: bool = False) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
@@ -227,7 +231,8 @@ class DefaultModelLoader(BaseModelLoader):
                                            fall_back_to_pt=getattr(
                                                model,
                                                "fall_back_to_pt_during_load",
-                                               True)), )
+                                               True),
+                                           from_remote_program=from_remote_program), )
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:

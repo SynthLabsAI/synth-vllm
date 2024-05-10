@@ -261,7 +261,10 @@ class GPTNeoXForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self,
+                     weights: Iterable[Tuple[str, torch.Tensor]],
+                     from_remote: bool = False
+                     ):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if ("attention.bias" in name or "attention.masked_bias" in name

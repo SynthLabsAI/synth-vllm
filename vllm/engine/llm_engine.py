@@ -96,6 +96,7 @@ class LLMEngine:
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        from_remote_program: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -167,6 +168,7 @@ class LLMEngine:
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
             load_config=load_config,
+            from_remote_program=from_remote_program,
         )
 
         self._initialize_kv_caches()

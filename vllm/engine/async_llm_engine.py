@@ -373,6 +373,7 @@ class AsyncLLMEngine:
             max_log_len=engine_args.max_log_len,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            from_remote_program=engine_args.from_remote_program,
         )
         return engine
 
