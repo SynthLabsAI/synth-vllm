@@ -7,6 +7,8 @@ import os
 import tempfile
 from collections import defaultdict
 from typing import Any, Generator, Iterable, List, Optional, Tuple
+import socket
+import pickle
 
 import filelock
 import huggingface_hub.constants
@@ -15,6 +17,7 @@ import torch
 from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from torch.multiprocessing.reductions import rebuild_cuda_tensor
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
@@ -279,6 +282,21 @@ def safetensors_weights_iterator(
             for name in f.keys():  # noqa: SIM118
                 param = f.get_tensor(name)
                 yield name, param
+
+
+def remote_weights_iterator() -> Generator[Tuple[str, torch.Tensor], None, None]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('localhost', 6000))
+    end = False
+    while not end:
+        cuda_tensor_info = pickle.loads(s.recv(4096))
+        end = cuda_tensor_info.pop('end')
+        print(cuda_tensor_info)
+        state_dict_key = cuda_tensor_info.pop('state_dict_key')
+        weight = rebuild_cuda_tensor(torch.Tensor, **cuda_tensor_info)
+        if not end:
+            s.send(b' ')
+        yield state_dict_key, weight
 
 
 def pt_weights_iterator(

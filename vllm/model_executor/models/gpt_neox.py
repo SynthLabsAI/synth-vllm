@@ -261,35 +261,51 @@ class GPTNeoXForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self,
+                     weights: Iterable[Tuple[str, torch.Tensor]],
+                     from_remote: bool = False
+                     ):
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            if ("attention.bias" in name or "attention.masked_bias" in name
-                    or "rotary_emb.inv_freq" in name):
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using OpenRLHF may include
-                # these tensors in the checkpoint. Skip them.
-                continue
-            param = params_dict[name]
+        if not from_remote:
+            for name, loaded_weight in weights:
+                if ("attention.bias" in name or "attention.masked_bias" in name
+                        or "rotary_emb.inv_freq" in name):
+                    continue
+                if ("rotary_emb.cos_cached" in name
+                        or "rotary_emb.sin_cached" in name):
+                    # Models trained using OpenRLHF may include
+                    # these tensors in the checkpoint. Skip them.
+                    continue
+                param = params_dict[name]
 
-            if "query_key_value" in name:
-                # NOTE: GPT-NeoX's fused QKV's output_dim has the shape of
-                # (num_heads * 3 * head_size), while the
-                # required shape is (3 * num_heads * head_size).
-                # Thus, we need weight conversion.
-                output_dim = getattr(param, "output_dim", None)
-                num_heads = self.config.num_attention_heads
-                if output_dim is not None:
-                    loaded_weight_shape = loaded_weight.shape
-                    loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
-                        loaded_weight_shape[output_dim + 1:])
-                    loaded_weight = loaded_weight.transpose(
-                        output_dim, output_dim + 1)
-                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
+                if "query_key_value" in name:
+                    # NOTE: GPT-NeoX's fused QKV's output_dim has the shape of
+                    # (num_heads * 3 * head_size), while the
+                    # required shape is (3 * num_heads * head_size).
+                    # Thus, we need weight conversion.
+                    output_dim = getattr(param, "output_dim", None)
+                    num_heads = self.config.num_attention_heads
+                    if output_dim is not None:
+                        loaded_weight_shape = loaded_weight.shape
+                        loaded_weight = loaded_weight.view(
+                            loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
+                            loaded_weight_shape[output_dim + 1:])
+                        loaded_weight = loaded_weight.transpose(
+                            output_dim, output_dim + 1)
+                        loaded_weight = loaded_weight.reshape(loaded_weight_shape)
 
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+        else:
+            for name, loaded_weight in weights:
+                if ("attention.bias" in name or "attention.masked_bias" in name
+                        or "rotary_emb.inv_freq" in name):
+                    continue
+                if ("rotary_emb.cos_cached" in name
+                        or "rotary_emb.sin_cached" in name):
+                    # Models trained using OpenRLHF may include
+                    # these tensors in the checkpoint. Skip them.
+                    continue
+                # point the remote tensor to the local tensor
+                params_dict[name] = loaded_weight

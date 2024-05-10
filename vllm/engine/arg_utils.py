@@ -86,6 +86,7 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
+    from_remote_program: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -102,6 +103,11 @@ class EngineArgs:
             type=str,
             default='facebook/opt-125m',
             help='Name or path of the huggingface model to use.')
+        parser.add_argument(
+            "--from-remote-program",
+            action="store_true",
+            help="If specified, the model tensors are from a remote program."
+        )
         parser.add_argument(
             '--tokenizer',
             type=nullable_str,

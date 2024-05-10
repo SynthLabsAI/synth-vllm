@@ -46,6 +46,7 @@ class Worker(WorkerBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         is_driver_worker: bool = False,
+        from_remote_program: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -81,6 +82,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            from_remote_program=from_remote_program
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.

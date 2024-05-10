@@ -113,6 +113,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        from_remote_program: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -123,6 +124,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.from_remote_program = from_remote_program
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -162,6 +164,7 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
+                from_remote_program=self.from_remote_program
             )
 
         self.model_memory_usage = m.consumed_memory
