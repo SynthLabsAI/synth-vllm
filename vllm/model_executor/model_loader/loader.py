@@ -225,27 +225,14 @@ class DefaultModelLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
-            if not from_remote_program:
-                model.load_weights(
-                    self._get_weights_iterator(model_config.model,
-                                               model_config.revision,
-                                               fall_back_to_pt=getattr(
-                                                   model,
-                                                   "fall_back_to_pt_during_load",
-                                                   True),
-                                               from_remote_program=False), )
-            else:
-                weights = self._get_weights_iterator(model_config.model,
-                                               model_config.revision,
-                                               fall_back_to_pt=getattr(
-                                                   model,
-                                                   "fall_back_to_pt_during_load",
-                                                   True),
-                                                from_remote_program=True)
-                params_dict = dict(model.named_parameters())
-                for name, loaded_weight in weights:
-                    # point the remote tensor to the local tensor
-                    params_dict[name] = loaded_weight
+            model.load_weights(
+                self._get_weights_iterator(model_config.model,
+                                           model_config.revision,
+                                           fall_back_to_pt=getattr(
+                                               model,
+                                               "fall_back_to_pt_during_load",
+                                               True),
+                                           from_remote_program=from_remote_program), )
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
