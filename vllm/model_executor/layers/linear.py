@@ -251,7 +251,11 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, is_remote: bool = False):
+        if is_remote:
+            # Can ignore other parameters.
+            param.data = loaded_weight
+            return
         # Special case for Fp8 scales.
         fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
                                            None)
@@ -485,7 +489,8 @@ class QKVParallelLinear(ColumnParallelLinear):
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[str] = None):
+                      loaded_shard_id: Optional[str] = None,
+                      is_remote: bool = False):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
@@ -493,13 +498,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Special case for Fp8 scales.
         fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
                                            None)
-
+        # Special case for remote parameters
+        if is_remote:
+            param_data = loaded_weight
+            return
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
-                return
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
                 ("q", 0, self.total_num_heads * self.head_size),
@@ -652,7 +659,11 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, is_remote: bool = False):
+        if is_remote:
+            # Can ignore other parameters.
+            param.data = loaded_weight
+            return
         # Special case for Fp8 scales.
         fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
                                            None)

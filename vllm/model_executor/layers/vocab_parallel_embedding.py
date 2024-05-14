@@ -79,7 +79,9 @@ class VocabParallelEmbedding(torch.nn.Module):
             "weight_loader": self.weight_loader
         })
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, is_remote: bool = False):
+        if is_remote:
+            param.data = loaded_weight
         parallel_dim = param.parallel_dim
         assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
         loaded_weight = loaded_weight[self.vocab_start_index:self.
