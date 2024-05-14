@@ -58,14 +58,25 @@ class GPTNeoXAttention(nn.Module):
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
-
-        self.query_key_value = QKVParallelLinear(
-            config.hidden_size,
-            self.head_size,
-            self.total_num_heads,
-            bias=self.bias,
-            quant_config=quant_config,
-        )
+        is_remote = False if "is_remote" not in dir(config) else config.is_remote
+        if not is_remote:
+            self.query_key_value = QKVParallelLinear(
+                config.hidden_size,
+                self.head_size,
+                self.total_num_heads,
+                bias=self.bias,
+                quant_config=quant_config,
+            )
+        else:
+            # This should be exactly the same but it's not so...
+            # ColumnParallelLinear is used instead of QKVParallelLinear
+            # This fixes my sanity.
+            self.query_key_value = ColumnParallelLinear(
+                config.hidden_size,
+                self.total_num_heads * 3 * self.head_size,
+                bias=self.bias,
+                quant_config=quant_config,
+            )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
@@ -85,6 +96,7 @@ class GPTNeoXAttention(nn.Module):
             base=rope_theta,
         )
         self.attn = Attention(self.num_heads, self.head_size, scaling)
+        self.attn_reorder = False if "is_remote" not in dir(config) else config.is_remote
 
     def forward(
         self,
@@ -94,6 +106,19 @@ class GPTNeoXAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
+        if self.attn_reorder:
+            # comes in as (num_heads * 3 * head_size), while the
+            # required shape is (3 * num_heads * head_size).
+            # Thus, we need weight conversion.
+
+            if len(qkv.shape) == 2:
+                qkv = qkv.view(qkv.size(0), self.num_heads, 3, -1)
+                qkv = qkv.transpose(1, 2).contiguous()
+                qkv = qkv.view(qkv.size(0), -1)
+            else:
+                qkv = qkv.view(qkv.size(0), qkv.size(1), self.num_heads, 3, -1)
+                qkv = qkv.transpose(2, 3).contiguous()
+                qkv = qkv.view(qkv.size(0), qkv.size(1), -1)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -277,7 +302,7 @@ class GPTNeoXForCausalLM(nn.Module):
                 continue
             param = params_dict[name]
 
-            if "query_key_value" in name:
+            if ("query_key_value" in name) and (not from_remote):
                 # NOTE: GPT-NeoX's fused QKV's output_dim has the shape of
                 # (num_heads * 3 * head_size), while the
                 # required shape is (3 * num_heads * head_size).
@@ -292,7 +317,6 @@ class GPTNeoXForCausalLM(nn.Module):
                     loaded_weight = loaded_weight.transpose(
                         output_dim, output_dim + 1)
                     loaded_weight = loaded_weight.reshape(loaded_weight_shape)
-
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            weight_loader(param, loaded_weight, is_remote=from_remote)

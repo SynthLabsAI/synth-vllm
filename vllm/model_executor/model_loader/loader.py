@@ -221,6 +221,7 @@ class DefaultModelLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    from_remote_program: bool = False) -> nn.Module:
+        model_config.hf_config.is_remote = from_remote_program
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
@@ -232,7 +233,8 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True),
-                                           from_remote_program=from_remote_program), )
+                                           from_remote_program=from_remote_program),
+                from_remote=from_remote_program)
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
