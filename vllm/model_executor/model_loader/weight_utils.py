@@ -23,6 +23,7 @@ from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
@@ -285,8 +286,17 @@ def safetensors_weights_iterator(
 
 
 def remote_weights_iterator() -> Generator[Tuple[str, torch.Tensor], None, None]:
+    # First, check to see if CUDA_VISIBLE_DEVICES is set so we have an offset
+    # for the port number.
+    # This is necessary for data parallel training.
+    # TODO: Make this user configurable or use a messaging system.
+    # TODO: Raise errors if not using nvidia devices.
+    offset = os.environ.get("CUDA_VISIBLE_DEVICES", 0)
+    if isinstance(offset, str):
+        offset = int(offset.split(",")[0].strip())
+    rank = get_tensor_model_parallel_rank()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('localhost', 6000))
+    s.connect(('localhost', 6000 + int(rank) + offset))
     end = False
     while not end:
         cuda_tensor_info = pickle.loads(s.recv(4096))
