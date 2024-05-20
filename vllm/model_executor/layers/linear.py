@@ -625,6 +625,7 @@ class RowParallelLinear(LinearBase):
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
+        scale_bias_by_tp: bool = False,
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
@@ -635,6 +636,7 @@ class RowParallelLinear(LinearBase):
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.scale_bias_by_tp = scale_bias_by_tp
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self,
@@ -669,6 +671,7 @@ class RowParallelLinear(LinearBase):
                                            None)
 
         tp_rank = get_tensor_model_parallel_rank()
+        bias_scale_factor = 1.0
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
         if input_dim is not None:
@@ -694,7 +697,9 @@ class RowParallelLinear(LinearBase):
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
-
+        bias_scale_factor = 1.0
+        if self.scale_bias_by_tp:
+            bias_scale_factor = get_tensor_model_parallel_world_size()
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_parallel)
@@ -704,7 +709,7 @@ class RowParallelLinear(LinearBase):
             output_ = output_parallel
 
         if not self.skip_bias_add:
-            output = output_ + self.bias if self.bias is not None else output_
+            output = output_ + (self.bias * bias_scale_factor) if self.bias is not None else output_
             output_bias = None
         else:
             output = output_
