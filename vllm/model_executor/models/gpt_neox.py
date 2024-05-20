@@ -38,6 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.distributed import get_tensor_model_parallel_rank
 
 
 class GPTNeoXAttention(nn.Module):
@@ -82,6 +83,7 @@ class GPTNeoXAttention(nn.Module):
             config.hidden_size,
             bias=self.bias,
             quant_config=quant_config,
+            scale_bias_by_tp=is_remote,
         )
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
@@ -134,6 +136,7 @@ class GPTNeoXMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        is_remote = False if "is_remote" not in dir(config) else config.is_remote
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -143,6 +146,7 @@ class GPTNeoXMLP(nn.Module):
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
+            scale_bias_by_tp=is_remote
         )
         self.act = get_act_fn(config.hidden_act, quant_config,
                               config.intermediate_size)
@@ -178,18 +182,21 @@ class GPTNeoXLayer(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         attn_input = self.input_layernorm(hidden_states)
+        # print("attn_input", attn_input[0], attn_input[-1])
         attn_output = self.attention(
             position_ids=position_ids,
             hidden_states=attn_input,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
+        # print("attn_output", attn_output[0], attn_output[-1])
         if self.use_parallel_residual:
             # pseudocode:
             # x = x + attn(ln1(x)) + mlp(ln2(x))
             mlp_input = self.post_attention_layernorm(hidden_states)
+            # print("mlp_input", mlp_input[0], mlp_input[-1])
             mlp_output = self.mlp(mlp_input)
+            # print("mlp_output", mlp_output[0], mlp_output[-1])
             hidden_states = mlp_output + attn_output + hidden_states
         else:
             # pseudocode:
@@ -231,6 +238,7 @@ class GPTNeoXModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_in(input_ids)
+        # print("embed_in", hidden_states[0], hidden_states[-1])
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states = layer(
@@ -240,6 +248,7 @@ class GPTNeoXModel(nn.Module):
                 attn_metadata,
             )
         hidden_states = self.final_layer_norm(hidden_states)
+        # print("final_layer_norm", hidden_states[0], hidden_states[-1])
         return hidden_states
 
 
@@ -291,6 +300,7 @@ class GPTNeoXForCausalLM(nn.Module):
                      from_remote: bool = False
                      ):
         params_dict = dict(self.named_parameters())
+        rank = get_tensor_model_parallel_rank()
         for name, loaded_weight in weights:
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
@@ -300,8 +310,30 @@ class GPTNeoXForCausalLM(nn.Module):
                 # Models trained using OpenRLHF may include
                 # these tensors in the checkpoint. Skip them.
                 continue
+            old_name = name
+            if from_remote:
+                # Parse from neox...
+                layer_num = int(name.split(".")[2])
+                if layer_num == 0:
+                    name = "gpt_neox.embed_in.weight"
+                elif layer_num-2 < len(self.gpt_neox.layers):
+                    name = '.'.join(name.split('.')[3:])
+                    name = f"gpt_neox.layers.{layer_num-2}." + name
+                else:
+                    if "norm" in name:
+                        name = "gpt_neox.final_layer_norm."
+                        if 'bias' in old_name:
+                            name += 'bias'
+                        else:
+                            name += 'weight'
+                    else:
+                        name = "embed_out."
+                        if 'bias' in old_name:
+                            name += 'bias'
+                        else:
+                            name += 'weight'
             param = params_dict[name]
-
+            # print(f"Loading {old_name} into {name}, old: {loaded_weight.shape} new: {param.shape}")
             if ("query_key_value" in name) and (not from_remote):
                 # NOTE: GPT-NeoX's fused QKV's output_dim has the shape of
                 # (num_heads * 3 * head_size), while the
@@ -320,3 +352,8 @@ class GPTNeoXForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight, is_remote=from_remote)
+            if rank == 1:
+                if len(param.shape) == 1:
+                    print(name, param.data)
+                else:
+                    print(name, param.data[0], param.data[-1])

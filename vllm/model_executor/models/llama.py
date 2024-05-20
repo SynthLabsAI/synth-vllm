@@ -35,6 +35,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -58,12 +59,28 @@ class LlamaMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         quant_config: Optional[QKVParallelLinear] = None,
+        is_remote: bool = False,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
+        self.is_remote = is_remote
+        if not is_remote:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config)
+        else:
+            self.gate_proj = ColumnParallelLinear(
+                hidden_size,
+                intermediate_size,
+                bias=False,
+                quant_config=quant_config,
+            )
+            self.up_proj = ColumnParallelLinear(
+                hidden_size,
+                intermediate_size,
+                bias=False,
+                quant_config=quant_config,
+            )
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -74,7 +91,12 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if not self.is_remote:
+            gate_up, _ = self.gate_up_proj(x)
+        else:
+            gate, _ = self.gate_proj(x)
+            up, _ = self.up_proj(x)
+            gate_up = torch.cat([gate, up], dim=-1)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -93,6 +115,7 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         sliding_window: Optional[int] = None,
+        is_remote: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -116,6 +139,7 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        self.is_remote = is_remote
 
         # This will be overwritten by model initialization if we are using it.
         # N.B. currently we only support per tensor scalar scaling factors
@@ -125,15 +149,25 @@ class LlamaAttention(nn.Module):
         # which is consistent with the practice of setting
         # scaling_factor = tensor_amax / FPtype_max
         self.kv_scale = 1.0
-
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
+        if not is_remote:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+            )
+        else:
+            # This should be exactly the same but it's not so...
+            # ColumnParallelLinear is used instead of QKVParallelLinear
+            # This fixes my sanity.
+            self.qkv_proj = ColumnParallelLinear(
+                hidden_size,
+                (self.total_num_heads + 2 * self.num_kv_heads) * self.head_dim,
+                bias=bias,
+                quant_config=quant_config,
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -162,7 +196,32 @@ class LlamaAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if not self.is_remote:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        else:
+            # comes in as (q_heads *  head_size * (1 + 2 * (kv_heads/q_heads))
+            if len(qkv.shape) == 2:
+                qkv = qkv.view(qkv.size(0), self.num_heads, -1)
+                splits = [
+                    self.head_dim,
+                    (qkv.shape[-1] - self.head_dim) // 2,
+                    (qkv.shape[-1] - self.head_dim) // 2,
+                    ]
+                q, k, v = qkv.split(splits, dim=-1)
+                q = q.reshape(q.size(0), -1).contiguous()
+                k = k.reshape(qkv.size(0), -1).contiguous()
+                v = v.reshape(qkv.size(0), -1).contiguous()
+            else:
+                qkv = qkv.view(qkv.size(0), qkv.size(1), self.num_heads, -1)
+                splits = [
+                    self.head_dim,
+                    (qkv.shape[-1] - self.head_dim) // 2,
+                    (qkv.shape[-1] - self.head_dim) // 2,
+                    ]
+                q, k, v = qkv.split(splits, dim=-1)
+                q = q.reshape(q.size(0), q.size(1), -1).contiguous()
+                k = k.reshape(q.size(0), q.size(1), -1).contiguous()
+                v = v.reshape(q.size(0), q.size(1), -1).contiguous()
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                 self.kv_scale)
@@ -192,6 +251,7 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        is_remote = False if "is_remote" not in dir(config) else config.is_remote
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -203,12 +263,14 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             sliding_window=sliding_window,
+            is_remote=is_remote,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            is_remote=is_remote,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -379,7 +441,8 @@ class LlamaForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]],
+                     from_remote: bool = False):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -397,17 +460,61 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+            old_name = name
+            if from_remote:
+                # Parse from neox...
+                layer_num = int(name.split(".")[2])
+                if layer_num == 0:
+                    name = "model.embed_tokens.weight"
+                elif layer_num - 2 < len(self.model.layers):
+                    name = '.'.join(name.split('.')[3:])
+                    if "mlp.w1" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".mlp.gate_proj.weight"
+                    elif "mlp.w2" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".mlp.down_proj.weight"
+                    elif "mlp.w3" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".mlp.up_proj.weight"
+                    elif "query_key_value" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".self_attn.qkv_proj.weight"
+                    elif "attention.dense" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".self_attn.o_proj.weight"
+                    elif "input_layernorm" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".input_layernorm.weight"
+                    elif "post_attention_layernorm" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".post_attention_layernorm.weight"
+                else:
+                    if "norm" in name:
+                        name = "model.norm."
+                        if 'bias' in old_name:
+                            name += 'bias'
+                        else:
+                            name += 'weight'
+                    else:
+                        name = "lm_head."
+                        if 'bias' in old_name:
+                            name += 'bias'
+                        else:
+                            name += 'weight'
+            if not from_remote:
+                for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
@@ -415,7 +522,7 @@ class LlamaForCausalLM(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader(param, loaded_weight, is_remote=from_remote)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

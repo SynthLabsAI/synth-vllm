@@ -296,7 +296,13 @@ def remote_weights_iterator() -> Generator[Tuple[str, torch.Tensor], None, None]
         offset = int(offset.split(",")[0].strip())
     rank = get_tensor_model_parallel_rank()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('localhost', 6000 + int(rank) + offset))
+    connected = False
+    while not connected:
+        try:
+            s.connect(('localhost', 6000 + int(rank) + offset))
+            connected = True
+        except Exception as e:
+            pass  # Do nothing, just try again
     end = False
     while not end:
         cuda_tensor_info = pickle.loads(s.recv(4096))
