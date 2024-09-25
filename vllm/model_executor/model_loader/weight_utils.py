@@ -308,6 +308,7 @@ def remote_weights_iterator() -> Generator[Tuple[str, torch.Tensor], None, None]
         cuda_tensor_info = pickle.loads(s.recv(4096))
         end = cuda_tensor_info.pop('end')
         print(cuda_tensor_info)
+        cuda_tensor_info['storage_device'] -= offset
         state_dict_key = cuda_tensor_info.pop('state_dict_key')
         weight = rebuild_cuda_tensor(torch.Tensor, **cuda_tensor_info)
         if not end:

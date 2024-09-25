@@ -60,14 +60,18 @@ class LlamaMLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QKVParallelLinear] = None,
         is_remote: bool = False,
+        split_gate_up: bool = False,
     ) -> None:
         super().__init__()
         self.is_remote = is_remote
-        if not is_remote:
+        self.split_gate_up = split_gate_up
+        if not split_gate_up:
             self.gate_up_proj = MergedColumnParallelLinear(
-                hidden_size, [intermediate_size] * 2,
+                hidden_size,
+                [intermediate_size] * 2,
                 bias=False,
-                quant_config=quant_config)
+                quant_config=quant_config
+            )
         else:
             self.gate_proj = ColumnParallelLinear(
                 hidden_size,
@@ -91,8 +95,11 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if not self.is_remote:
+        if not self.split_gate_up:
             gate_up, _ = self.gate_up_proj(x)
+            if self.is_remote:
+                # have to reorganize the tensor
+                gate_up = torch.cat(gate_up.chunk(2, dim=-1)[::-1], dim=-1)
         else:
             gate, _ = self.gate_proj(x)
             up, _ = self.up_proj(x)
@@ -470,10 +477,12 @@ class LlamaForCausalLM(nn.Module):
                     name = '.'.join(name.split('.')[3:])
                     if "mlp.w1" in name:
                         name = "model.layers." + str(layer_num - 2) + ".mlp.gate_proj.weight"
-                    elif "mlp.w2" in name:
+                    elif ("mlp.w2" in name) or ("mlp.linear2" in name):
                         name = "model.layers." + str(layer_num - 2) + ".mlp.down_proj.weight"
                     elif "mlp.w3" in name:
                         name = "model.layers." + str(layer_num - 2) + ".mlp.up_proj.weight"
+                    elif "mlp.linear1" in name:
+                        name = "model.layers." + str(layer_num - 2) + ".mlp.gate_up_proj.weight"
                     elif "query_key_value" in name:
                         name = "model.layers." + str(layer_num - 2) + ".self_attn.qkv_proj.weight"
                     elif "attention.dense" in name:

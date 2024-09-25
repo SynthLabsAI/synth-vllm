@@ -341,7 +341,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[int] = None):
+                      loaded_shard_id: Optional[int] = None,
+                      is_remote: bool = False
+                      ):
+        if is_remote:
+            # Can ignore other parameters.
+            param.data = loaded_weight
+            return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
