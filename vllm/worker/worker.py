@@ -59,6 +59,7 @@ class Worker(WorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.from_remote_program = from_remote_program
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
@@ -119,6 +120,10 @@ class Worker(WorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
+        if self.from_remote_program:
+            # Need to reset initial GPU memory after it's loaded...
+            torch.cuda.empty_cache()
+            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
